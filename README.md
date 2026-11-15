@@ -395,7 +395,7 @@ Use `{}` for a variable part (a name or number). Optional extra arguments give t
 - **Malwarebytes Browser Guard:** proprietary; it is never bundled, only installed by the user from addons.mozilla.org.
 - **VirusTotal:** a service by Google; use of its API is subject to its terms.
 - **Control D** (default DNS) and the listed search engines are third-party services with their own terms and privacy policies.
-- **Gabriel Browser's own code:** see the `LICENSE` file in this repository. uBlock Origin is not stored in the repository (the `assets/ublock` files are git-ignored and fetched by the script).
+- **Gabriel Browser's own code:** GNU General Public License v3.0 (see the `LICENSE` file). This matches uBlock Origin's license (GPLv3) and is compatible with GeckoView's MPL 2.0. uBlock Origin is not stored in the repository (the `assets/ublock` files are git-ignored and fetched by the script).
 - The *São Gabriel* dedication and the armillary-sphere icon honor Portugal's maritime history.
 
 *Built with care for people who like to explore the web privately.*
