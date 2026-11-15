@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="bg">#0F1316</color>
+    <color name="surface">#171C20</color>
+    <color name="pill">#232A30</color>
+    <color name="text">#E8EEF2</color>
+    <color name="text_secondary">#9AA7B2</color>
+    <color name="accent">#5CD6A4</color>
+    <color name="icon">#D5DDE3</color>
+    <color name="icon_disabled">#4A545C</color>
+    <color name="divider">#2B343B</color>
+</resources>

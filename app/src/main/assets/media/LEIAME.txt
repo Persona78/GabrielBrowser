@@ -1,0 +1,1 @@
+Gabriel Media Detector: extensão própria embutida (carregada em MainActivity). Não apagar.

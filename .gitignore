@@ -1,0 +1,12 @@
+*.iml
+.gradle/
+build/
+local.properties
+.idea/
+*.jks
+*.keystore
+keystore.properties
+
+# uBlock Origin (GPLv3) is fetched by scripts/update-ublock.sh, not stored here
+app/src/main/assets/ublock/*
+!app/src/main/assets/ublock/LEIAME.txt

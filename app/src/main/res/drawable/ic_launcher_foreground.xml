@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Esfera armilar (símbolo de Portugal e dos Descobrimentos), a dourado sobre verde escuro.
+  Camadas, de trás para a frente: metade traseira da eclítica, meridiano, metade da frente
+  da eclítica (por cima do meridiano), anel exterior, pontas do eixo e a Terra ao centro.
+  As "folgas" na cor do fundo (#0B4434) dão a sensação de anéis entrelaçados.
+  Tudo dentro da zona segura dos ícones adaptativos.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- eclítica inclinada: metade de trás -->
+    <group android:pivotX="54" android:pivotY="54" android:rotation="-22">
+        <path
+            android:fillColor="#00000000"
+            android:pathData="M27.5,54 A26.5,10 0 0,1 80.5,54"
+            android:strokeColor="#F2C14E"
+            android:strokeLineCap="round"
+            android:strokeWidth="3.6" />
+    </group>
+
+    <!-- meridiano (com folga para passar por cima da eclítica de trás) -->
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M44,54 A10,26.5 0 1,0 64,54 A10,26.5 0 1,0 44,54 Z"
+        android:strokeColor="#0B4434"
+        android:strokeWidth="7" />
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M44,54 A10,26.5 0 1,0 64,54 A10,26.5 0 1,0 44,54 Z"
+        android:strokeColor="#F2C14E"
+        android:strokeWidth="3.6" />
+
+    <!-- eclítica inclinada: metade da frente (por cima do meridiano) -->
+    <group android:pivotX="54" android:pivotY="54" android:rotation="-22">
+        <path
+            android:fillColor="#00000000"
+            android:pathData="M27.5,54 A26.5,10 0 0,0 80.5,54"
+            android:strokeColor="#0B4434"
+            android:strokeLineCap="round"
+            android:strokeWidth="7" />
+        <path
+            android:fillColor="#00000000"
+            android:pathData="M27.5,54 A26.5,10 0 0,0 80.5,54"
+            android:strokeColor="#F2C14E"
+            android:strokeLineCap="round"
+            android:strokeWidth="3.8" />
+    </group>
+
+    <!-- anel exterior -->
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M27.5,54 A26.5,26.5 0 1,0 80.5,54 A26.5,26.5 0 1,0 27.5,54 Z"
+        android:strokeColor="#F2C14E"
+        android:strokeWidth="4" />
+
+    <!-- pontas do eixo polar -->
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M54,27 L54,23 M54,81 L54,85"
+        android:strokeColor="#F2C14E"
+        android:strokeWidth="3" />
+    <path
+        android:fillColor="#F2C14E"
+        android:pathData="M54,21.4 m-2.8,0 a2.8,2.8 0 1,0 5.6,0 a2.8,2.8 0 1,0 -5.6,0" />
+    <path
+        android:fillColor="#F2C14E"
+        android:pathData="M54,86.6 m-2.8,0 a2.8,2.8 0 1,0 5.6,0 a2.8,2.8 0 1,0 -5.6,0" />
+
+    <!-- a Terra, ao centro: vermelho de Portugal com halo para destacar -->
+    <path
+        android:fillColor="#0B4434"
+        android:pathData="M54,54 m-7.6,0 a7.6,7.6 0 1,0 15.2,0 a7.6,7.6 0 1,0 -15.2,0" />
+    <path
+        android:fillColor="#E03C31"
+        android:pathData="M54,54 m-5.2,0 a5.2,5.2 0 1,0 10.4,0 a5.2,5.2 0 1,0 -10.4,0"
+        android:strokeColor="#F2C14E"
+        android:strokeWidth="2" />
+</vector>

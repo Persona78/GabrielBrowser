@@ -1,0 +1,14 @@
+Esta pasta deve conter a extensão uBlock Origin já descompactada
+(manifest.json na raiz desta pasta).
+
+Forma fácil:   ./scripts/update-ublock.sh
+
+Forma manual:  descarrega o .xpi do Firefox em
+               https://github.com/gorhill/uBlock/releases
+               e descompacta-o aqui (um .xpi é um ZIP).
+
+Se esta pasta estiver vazia, a app funciona na mesma, só sem o uBlock Origin
+(vê o Logcat: "uBlock Origin não carregou").
+
+Licença: o uBlock Origin é GPLv3. Para uso pessoal não há problema; se distribuíres
+o APK a terceiros, cumpre os termos da licença.

@@ -1,0 +1,18 @@
+{
+  "manifest_version": 2,
+  "name": "Gabriel Media Detector",
+  "version": "1.0.0",
+  "description": "Deteta vídeos, áudio e imagens na página e envia a lista para a app. Nada sai do telemóvel.",
+  "browser_specific_settings": {
+    "gecko": { "id": "media@gabriel.browser" }
+  },
+  "permissions": ["nativeMessaging", "nativeMessagingFromContent", "geckoViewAddons"],
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ]
+}
