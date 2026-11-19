@@ -10,3 +10,8 @@ keystore.properties
 # uBlock Origin (GPLv3) is fetched by scripts/update-ublock.sh, not stored here
 app/src/main/assets/ublock/*
 !app/src/main/assets/ublock/LEIAME.txt
+
+# APK/AAB compilados: não vão para o repositório (publicar em Releases)
+*.apk
+*.aab
+app/release/

@@ -23,6 +23,7 @@ import android.provider.MediaStore
 import android.text.InputType
 import android.util.Log
 import android.view.View
+import android.view.ViewGroup
 import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.view.inputmethod.EditorInfo
@@ -35,6 +36,8 @@ import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
+import org.json.JSONArray
+import org.json.JSONObject
 import org.mozilla.geckoview.AllowOrDeny
 import org.mozilla.geckoview.ContentBlocking
 import org.mozilla.geckoview.GeckoResult
@@ -109,9 +112,17 @@ class MainActivity : Activity() {
         private const val KEY_VT_AUTO = "vt_auto"
         private const val UBLOCK_ID = "uBlock0@raymondhill.net"
         private const val REQ_FILE = 42
-        private const val REQ_FOLDER = 43
         private const val REQ_PERM = 44
-        private const val KEY_DL_TREE = "dl_tree"
+        private const val REQ_RESTORE = 46
+        private const val KEY_ZOOM = "zoom"             // tamanho do texto em %
+        private const val KEY_BAR_BOTTOM = "bar_bottom"  // barra de endereço em baixo
+        private const val KEY_EXTS = "ext_urls"    // mapa id -> link .xpi das extensões do utilizador
+        private const val BACKUP_DIR = "GabrielBrowser"
+        private val BACKUP_KEYS = listOf(
+            "doh_url", "engine", "bookmarks", "home_url", "lang", "vt_key",
+            "history", "history_on", "vt_auto", "dl_dir", "zoom", "bar_bottom"
+        )
+        private const val KEY_DL_DIR = "dl_dir"   // caminho absoluto da pasta escolhida (vazio = Transferências)
         private const val TAG = "GabrielBrowser"
         private const val BROWSER_GUARD_URL =
             "https://addons.mozilla.org/firefox/downloads/file/5140538/malwarebytes-3.3.8.xpi"
@@ -139,7 +150,11 @@ class MainActivity : Activity() {
         var blocked = 0
         var desktop = false
         var appNav = false
+        var isPrivate = false
+        var readerPort: WebExtension.Port? = null
         var lastInsecure: String? = null
+        val errorUris = HashSet<String>() // data: URIs das páginas de erro deste separador
+        var errorFor: String? = null      // endereço que falhou
         val media = LinkedHashMap<String, MediaItem>()
     }
 
@@ -210,9 +225,11 @@ class MainActivity : Activity() {
         rt = getOrCreateRuntime()
         openNewTab(null, load = false)
         setupUi()
+        applyBarPosition()
         updateNavButtons()
         updateShield()
 
+        prefs().edit().remove("dl_tree").remove("dl_sub_name").remove("dl_sub").apply()
         val f = IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE)
         @Suppress("UnspecifiedRegisterReceiverFlag")
         if (Build.VERSION.SDK_INT >= 33) registerReceiver(dlReceiver, f, Context.RECEIVER_NOT_EXPORTED)
@@ -275,9 +292,7 @@ class MainActivity : Activity() {
                 onClick = {
                     prefs().edit().putString(KEY_LANG, code).apply()
                     I18n.setup(code)
-                    urlBar.hint = I18n.tr(
-                        if (privateMode) "🕶 Privado — pesquisar ou escrever endereço" else "Pesquisar ou escrever endereço"
-                    )
+                    applyPrivateUi()
                 }
             )
         }
@@ -317,8 +332,7 @@ class MainActivity : Activity() {
         val builder = GeckoRuntimeSettings.Builder()
             // Só HTTPS
             .allowInsecureConnections(GeckoRuntimeSettings.HTTPS_ONLY)
-            // Permite afinar preferências em about:config (opcional)
-            .aboutConfigEnabled(true)
+            .aboutConfigEnabled(false)
             .contentBlocking(
                 ContentBlocking.Settings.Builder()
                     .antiTracking(ContentBlocking.AntiTracking.STRICT)
@@ -336,6 +350,13 @@ class MainActivity : Activity() {
 
         val created = GeckoRuntime.create(applicationContext, builder.build())
         runtime = created
+        try {
+            created.settings.setAutomaticFontSizeAdjustment(false)
+            created.settings.setFontSizeFactor(prefs().getInt(KEY_ZOOM, 100).coerceIn(50, 200) / 100f)
+        } catch (e: Throwable) { Log.w(TAG, "tamanho do texto: $e") }
+        try {
+            created.settings.setLnaEnabled(true)
+        } catch (e: Throwable) { Log.w(TAG, "rede local: $e") }
 
         // Confirmação de permissões ao instalar extensões
         created.webExtensionController.promptDelegate = object : WebExtensionController.PromptDelegate {
@@ -402,11 +423,20 @@ class MainActivity : Activity() {
     }
 
     // Modo privado: sessão sem histórico/cookies persistentes; não vai para os recentes nem permite capturas de ecrã.
-    private var privateMode = false
-
+    /** O modo privado é por separador: os separadores normais abertos mantêm-se. */
     private fun togglePrivateMode() {
-        privateMode = !privateMode
-        if (privateMode) {
+        val toPrivate = !active.isPrivate
+        if (tabs.size >= MAX_TABS) {
+            toast("Limite de separadores atingido")
+            return
+        }
+        openNewTab(null, true, toPrivate)
+        toast(if (toPrivate) "Separador privado aberto" else "Separador normal aberto")
+    }
+
+    private fun applyPrivateUi() {
+        val priv = active.isPrivate
+        if (priv) {
             window.setFlags(
                 android.view.WindowManager.LayoutParams.FLAG_SECURE,
                 android.view.WindowManager.LayoutParams.FLAG_SECURE
@@ -414,23 +444,30 @@ class MainActivity : Activity() {
         } else {
             window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
         }
-        val old = tabs.toList()
-        tabs.clear()
-        old.forEach {
-            try {
-                it.session.close()
-            } catch (e: Exception) {
-                Log.w(TAG, "close falhou: $e")
-            }
-        }
-        openNewTab(null)
-        urlBar.hint = I18n.tr(if (privateMode) "🕶 Privado — pesquisar ou escrever endereço" else "Pesquisar ou escrever endereço")
-        toast(if (privateMode) "Modo privado ligado" else "Modo privado desligado")
+        urlBar.hint = I18n.tr(if (priv) "🕶 Privado — pesquisar ou escrever endereço" else "Pesquisar ou escrever endereço")
     }
 
     // ---------------------------------------------------------------- deteção de media
 
     private val mediaDelegate = object : WebExtension.MessageDelegate {
+        override fun onConnect(port: WebExtension.Port) {
+            val sess = port.sender.session ?: return
+            val tab = tabs.firstOrNull { it.session === sess } ?: return
+            tab.readerPort = port
+            port.setDelegate(object : WebExtension.PortDelegate {
+                override fun onPortMessage(message: Any, port: WebExtension.Port) {
+                    val o = message as? JSONObject ?: return
+                    if (o.optString("type") == "reader" && !o.optBoolean("ok", false)) {
+                        toast("Não foi possível abrir o modo de leitura")
+                    }
+                }
+
+                override fun onDisconnect(port: WebExtension.Port) {
+                    if (tab.readerPort === port) tab.readerPort = null
+                }
+            })
+        }
+
         override fun onMessage(
             nativeApp: String,
             message: Any,
@@ -510,16 +547,18 @@ class MainActivity : Activity() {
 
     // ---------------------------------------------------------------- separadores
 
-    private fun newGeckoSession(): GeckoSession =
-        GeckoSession(GeckoSessionSettings.Builder().usePrivateMode(privateMode).build())
+    private fun newGeckoSession(priv: Boolean): GeckoSession =
+        GeckoSession(GeckoSessionSettings.Builder().usePrivateMode(priv).build())
 
-    private fun openNewTab(url: String?, load: Boolean = true) {
+    private fun openNewTab(url: String?, load: Boolean = true, priv: Boolean? = null) {
         if (tabs.size >= MAX_TABS) {
             toast("Limite de separadores atingido")
             return
         }
-        val s = newGeckoSession()
+        val isPriv = priv ?: (tabs.isNotEmpty() && ::active.isInitialized && active.isPrivate)
+        val s = newGeckoSession(isPriv)
         val tab = Tab(s)
+        tab.isPrivate = isPriv
         tabs.add(tab)
         setupDelegates(s, tab)
         s.open(rt)
@@ -537,7 +576,9 @@ class MainActivity : Activity() {
     }
 
     private fun switchTo(tab: Tab) {
+        if (::active.isInitialized && active !== tab) hideFindBar()
         active = tab
+        applyPrivateUi()
         attachToView(tab.session)
         refreshAddressBar()
         updateNavButtons()
@@ -579,7 +620,7 @@ class MainActivity : Activity() {
         tabs.forEach { t ->
             val name = t.title?.trim().takeUnless { it.isNullOrEmpty() } ?: (hostOf(t.url) ?: "Novo separador")
             sh.card(
-                icon = if (t === active) "●" else (name.firstOrNull { it.isLetterOrDigit() }?.uppercase() ?: "•"),
+                icon = if (t.isPrivate) "🕶" else if (t === active) "●" else (name.firstOrNull { it.isLetterOrDigit() }?.uppercase() ?: "•"),
                 title = name,
                 detail = t.url ?: "",
                 onClick = { switchTo(t) },
@@ -613,7 +654,7 @@ class MainActivity : Activity() {
             } catch (e: Exception) {
                 Log.w(TAG, "close falhou: $e")
             }
-            val s = newGeckoSession()
+            val s = newGeckoSession(tab.isPrivate)
             tab.session = s
             setupDelegates(s, tab)
             s.open(rt)
@@ -766,7 +807,7 @@ class MainActivity : Activity() {
                 perms: MutableList<GeckoSession.PermissionDelegate.ContentPermission>,
                 hasUserGesture: Boolean
             ) {
-                tab.url = url
+                tab.url = if (url != null && tab.errorUris.contains(url)) (tab.errorFor ?: url) else url
                 if (tab === active) {
                     refreshAddressBar()
                     if (url != null && url.startsWith("http://") && url != tab.lastInsecure) {
@@ -791,6 +832,9 @@ class MainActivity : Activity() {
                 request: GeckoSession.NavigationDelegate.LoadRequest
             ): GeckoResult<AllowOrDeny>? {
                 val uri = request.uri
+
+                // Página de erro própria (ligação não privada, etc.): única navegação data: permitida.
+                if (tab.errorUris.contains(uri)) return GeckoResult.fromValue(AllowOrDeny.ALLOW)
 
                 // 1) Esquemas que abrem outras apps ou ficheiros (intent://, market://, file://…): bloqueados.
                 val ok = uri.startsWith("https://") || uri.startsWith("http://") ||
@@ -834,6 +878,24 @@ class MainActivity : Activity() {
                 return GeckoResult.fromValue(AllowOrDeny.ALLOW)
             }
 
+            override fun onLoadError(
+                sess: GeckoSession,
+                uri: String?,
+                error: org.mozilla.geckoview.WebRequestError
+            ): GeckoResult<String>? {
+                if (error.category == org.mozilla.geckoview.WebRequestError.ERROR_CATEGORY_SAFEBROWSING) return null
+                return try {
+                    val page = ErrorPage.toUri(ErrorPage.build(uri, error, homeUrl()))
+                    if (tab.errorUris.size > 20) tab.errorUris.clear()
+                    tab.errorUris.add(page)
+                    tab.errorFor = uri
+                    GeckoResult.fromValue(page)
+                } catch (e: Exception) {
+                    Log.w(TAG, "página de erro falhou: $e")
+                    null
+                }
+            }
+
             override fun onNewSession(sess: GeckoSession, uri: String): GeckoResult<GeckoSession>? {
                 // Nunca abrimos janelas extra (já tratado em onLoadRequest).
                 return GeckoResult.fromValue(null)
@@ -867,7 +929,7 @@ class MainActivity : Activity() {
                     setLoadingUi(false)
                     progress.visibility = View.INVISIBLE
                 }
-                if (success) recordHistory(tab.url, tab.title)
+                if (success) recordHistory(tab.url, tab.title, tab.isPrivate)
             }
         }
 
@@ -1212,6 +1274,16 @@ class MainActivity : Activity() {
                     askPermission("$host quer saber a tua localização", { r.complete(allow) }, { r.complete(deny) })
                     r
                 }
+                GeckoSession.PermissionDelegate.PERMISSION_LOCAL_NETWORK_ACCESS -> {
+                    val r = GeckoResult<Int>()
+                    askPermission("$host quer ligar-se a dispositivos da tua rede local", { r.complete(allow) }, { r.complete(deny) })
+                    r
+                }
+                GeckoSession.PermissionDelegate.PERMISSION_LOCAL_DEVICE_ACCESS -> {
+                    val r = GeckoResult<Int>()
+                    askPermission("$host quer ligar-se a serviços neste dispositivo", { r.complete(allow) }, { r.complete(deny) })
+                    r
+                }
                 // Inofensivas e necessárias a muitos sites (armazenamento, vídeo com DRM).
                 GeckoSession.PermissionDelegate.PERMISSION_PERSISTENT_STORAGE,
                 GeckoSession.PermissionDelegate.PERMISSION_MEDIA_KEY_SYSTEM_ACCESS -> GeckoResult.fromValue(allow)
@@ -1251,21 +1323,8 @@ class MainActivity : Activity() {
     @Deprecated("Deprecated in Java")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode == REQ_FOLDER) {
-            val uri = data?.data
-            if (resultCode == RESULT_OK && uri != null) {
-                try {
-                    contentResolver.takePersistableUriPermission(
-                        uri,
-                        Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-                    )
-                    prefs().edit().putString(KEY_DL_TREE, uri.toString()).apply()
-                    toast("Pasta de downloads: ${folderLabel(uri)}")
-                } catch (e: Exception) {
-                    Log.w(TAG, "permissão da pasta falhou: $e")
-                    toast("Não foi possível usar essa pasta")
-                }
-            }
+        if (requestCode == REQ_RESTORE) {
+            if (resultCode == RESULT_OK) data?.data?.let { readBackup(it) }
             return
         }
         if (requestCode != REQ_FILE) return
@@ -1320,8 +1379,8 @@ class MainActivity : Activity() {
     }
 
     // Só guarda com a opção ligada e fora do modo privado.
-    private fun recordHistory(url: String?, title: String?) {
-        if (!historyOn() || privateMode || url == null) return
+    private fun recordHistory(url: String?, title: String?, priv: Boolean) {
+        if (!historyOn() || priv || url == null) return
         if (!(url.startsWith("https://") || url.startsWith("http://"))) return
         val list = loadHistory()
         list.removeAll { it.second == url }
@@ -1463,6 +1522,7 @@ class MainActivity : Activity() {
     /** Guarda um fluxo já aberto (em segundo plano). */
     private fun saveStream(body: java.io.InputStream, url: String, disposition: String?, mime: String?) {
         toast("A guardar: ${safeName(url, disposition, mime)}")
+        warnIfFolderLost()
         Thread {
             try {
                 saveBlocking(body, url, disposition, mime)
@@ -1475,50 +1535,57 @@ class MainActivity : Activity() {
         }.start()
     }
 
+    /** Nome livre na pasta: "ficheiro.ext", "ficheiro (1).ext", … */
+    private fun uniqueFile(dir: java.io.File, name: String): java.io.File {
+        var f = java.io.File(dir, name)
+        if (!f.exists()) return f
+        val dot = name.lastIndexOf('.')
+        val base = if (dot > 0) name.substring(0, dot) else name
+        val ext = if (dot > 0) name.substring(dot) else ""
+        var i = 1
+        while (f.exists() && i < 1000) {
+            f = java.io.File(dir, "$base ($i)$ext")
+            i++
+        }
+        return f
+    }
+
     /**
-     * Guarda um fluxo na pasta escolhida (SAF) ou em Transferências (MediaStore, sem permissões), confere o tipo
-     * real do ficheiro e avisa se não corresponder à extensão. Bloqueia: chamar fora da thread principal.
+     * Guarda um fluxo na pasta escolhida (se houver e a permissão estiver ativa) ou em Transferências (MediaStore),
+     * confere o tipo real do ficheiro e avisa se não corresponder à extensão. Bloqueia: chamar fora da thread principal.
      * Se falhar, apaga o ficheiro parcial e lança a exceção.
      */
     private fun saveBlocking(body: java.io.InputStream, url: String, disposition: String?, mime: String?) {
         val name = safeName(url, disposition, mime)
         val type = mime.takeUnless { it.isNullOrEmpty() } ?: "application/octet-stream"
-        val tree = prefs().getString(KEY_DL_TREE, null)
+        val dir = dlDir()
+        var file: java.io.File? = null
         var created: Uri? = null
-        var viaStore = false
         val head = ByteArray(64)
         var n = 0
 
-        fun removeSaved(u: Uri, store: Boolean) {
-            try {
-                if (store) contentResolver.delete(u, null, null)
-                else android.provider.DocumentsContract.deleteDocument(contentResolver, u)
-            } catch (e: Exception) {
-                Log.w(TAG, "apagar falhou: $e")
-            }
-        }
-
         try {
-            val out: java.io.OutputStream
-            if (tree != null) {
-                val t = Uri.parse(tree)
-                val parent = android.provider.DocumentsContract.buildDocumentUriUsingTree(
-                    t, android.provider.DocumentsContract.getTreeDocumentId(t)
-                )
-                val doc = android.provider.DocumentsContract.createDocument(contentResolver, parent, type, name)
-                    ?: throw java.io.IOException("não foi possível criar o ficheiro")
-                created = doc
-                out = contentResolver.openOutputStream(doc) ?: throw java.io.IOException("sem acesso à pasta")
-            } else {
+            var out: java.io.OutputStream? = null
+            if (dir != null) {
+                try {
+                    val f = uniqueFile(dir, name)
+                    out = java.io.FileOutputStream(f)
+                    file = f
+                } catch (e: java.io.IOException) {
+                    Log.w(TAG, "pasta escolhida não aceita ficheiros: $e")
+                    toast("Pasta indisponível: a guardar em Transferências")
+                }
+            }
+            if (out == null) {
                 val cv = ContentValues().apply {
                     put(MediaStore.Downloads.DISPLAY_NAME, name)
                     put(MediaStore.Downloads.MIME_TYPE, type)
                     put(MediaStore.Downloads.IS_PENDING, 1)
+                    put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
                 }
                 val u = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, cv)
                     ?: throw java.io.IOException("não foi possível criar o ficheiro")
                 created = u
-                viaStore = true
                 out = contentResolver.openOutputStream(u) ?: throw java.io.IOException("sem acesso a Transferências")
             }
             while (n < head.size) {
@@ -1530,21 +1597,35 @@ class MainActivity : Activity() {
                 o.write(head, 0, n)
                 body.copyTo(o, 64 * 1024)
             }
-            if (viaStore) {
-                contentResolver.update(
-                    created!!, ContentValues().apply { put(MediaStore.Downloads.IS_PENDING, 0) }, null, null
-                )
+            val saved = created
+            if (saved != null) {
+                contentResolver.update(saved, ContentValues().apply { put(MediaStore.Downloads.IS_PENDING, 0) }, null, null)
+            } else {
+                file?.let { android.media.MediaScannerConnection.scanFile(this, arrayOf(it.path), arrayOf(type), null) }
             }
         } catch (e: Exception) {
-            created?.let { removeSaved(it, viaStore) }
+            try {
+                file?.delete()
+                created?.let { contentResolver.delete(it, null, null) }
+            } catch (e2: Exception) {
+                Log.w(TAG, "limpeza do ficheiro parcial falhou: $e2")
+            }
             throw e
         }
 
-        val doc = created!!
-        val store = viaStore
+        val savedFile = file
+        val savedUri = created
         val v = FileCheck.check(head.copyOf(n), name)
-        if (v.ok) toast("Guardado: $name")
-        else runOnUiThread { warnFile(name, v) { removeSaved(doc, store) } }
+        if (v.ok) {
+            toast("Guardado: $name")
+        } else {
+            runOnUiThread {
+                warnFile(name, v) {
+                    savedFile?.delete()
+                    savedUri?.let { contentResolver.delete(it, null, null) }
+                }
+            }
+        }
     }
 
     /** Descarrega um endereço http(s). Para imagens/vídeos/áudio (pressão longa) envia o site de origem como Referer. */
@@ -1553,10 +1634,9 @@ class MainActivity : Activity() {
             toast("Transferência não suportada (só ligações https)")
             return
         }
-        // Pasta escolhida pelo utilizador: a app descarrega ela própria.
-        val tree = prefs().getString(KEY_DL_TREE, null)
-        if (tree != null) {
-            saveToTree(url, disposition, mime, if (withReferer) currentUrl else null)
+        warnIfFolderLost()
+        if (dlDir() != null) {
+            saveToFolder(url, disposition, mime, if (withReferer) currentUrl else null)
         } else {
             downloadViaManager(url, disposition, mime, withReferer)
         }
@@ -1585,8 +1665,25 @@ class MainActivity : Activity() {
 
     // ---------------------------------------------------------------- pasta de downloads
 
-    /** Descarrega para a pasta escolhida (Storage Access Framework). Se falhar, recua para Transferências. */
-    private fun saveToTree(url: String, disposition: String?, mime: String?, referer: String?) {
+    /** Acesso a todos os ficheiros (Android 11+): é o que permite guardar em qualquer pasta, incluindo Transferências. */
+    private fun hasAllFiles(): Boolean = Build.VERSION.SDK_INT >= 30 && Environment.isExternalStorageManager()
+
+    /** Pasta escolhida, ou null se for a predefinida (ou se a permissão foi retirada ou a pasta já não existe). */
+    private fun dlDir(): java.io.File? {
+        val p = prefs().getString(KEY_DL_DIR, null) ?: return null
+        if (!hasAllFiles()) return null
+        val f = java.io.File(p)
+        return if (f.isDirectory) f else null
+    }
+
+    private fun warnIfFolderLost() {
+        if (prefs().getString(KEY_DL_DIR, null) != null && dlDir() == null) {
+            toast("A pasta escolhida já não está disponível: a guardar em Transferências")
+        }
+    }
+
+    /** Descarrega para a pasta escolhida. Se falhar, recua para Transferências. */
+    private fun saveToFolder(url: String, disposition: String?, mime: String?, referer: String?) {
         toast("A guardar…")
         Thread {
             try {
@@ -1615,49 +1712,133 @@ class MainActivity : Activity() {
         }.start()
     }
 
-    private fun folderLabel(tree: Uri): String = try {
-        val id = android.provider.DocumentsContract.getTreeDocumentId(tree)
-        val vol = id.substringBefore(':')
-        val path = id.substringAfter(':', "")
-        (if (vol == "primary") "Telemóvel" else vol) + if (path.isEmpty()) "" else " / " + path.replace("/", " / ")
-    } catch (e: Exception) {
-        tree.lastPathSegment ?: tree.toString()
+    /** "Telemóvel / Download / Videos" em vez de "/storage/emulated/0/Download/Videos". */
+    private fun folderLabel(f: java.io.File): String {
+        val root = Environment.getExternalStorageDirectory().path
+        return if (f.path == root) "Telemóvel"
+        else if (f.path.startsWith("$root/")) "Telemóvel / " + f.path.removePrefix("$root/").replace("/", " / ")
+        else f.path
     }
 
     private fun showDownloadFolder() {
-        val saved = prefs().getString(KEY_DL_TREE, null)
+        val cur = dlDir()
         val sh = Sheet(this, "Pasta de downloads", "Onde os ficheiros são guardados")
         sh.card(
-            icon = if (saved == null) "✓" else "📥",
-            title = "Transferências",
-            detail = I18n.tr("Pasta predefinida do Android") + if (saved == null) "  ·  " + I18n.tr("atual") else "",
-            onClick = {
-                prefs().edit().remove(KEY_DL_TREE).apply()
-                toast("Pasta: Transferências")
-            }
+            icon = "📥",
+            title = if (cur == null) "Transferências" else folderLabel(cur),
+            detail = if (cur == null) I18n.tr("Pasta predefinida do Android") else I18n.tr("Pasta escolhida")
         )
-        if (saved != null) {
-            sh.card(icon = "✓", title = "Pasta escolhida", detail = folderLabel(Uri.parse(saved)) + "  ·  " + I18n.tr("atual"))
+        sh.note("Para guardar numa pasta à tua escolha o Android pede a permissão «Acesso a todos os ficheiros». A app usa-a só para guardar os teus downloads.")
+        sh.actions(
+            Triple("Escolher pasta", BtnStyle.PRIMARY) { chooseFolder() },
+            Triple("Predefinida", BtnStyle.SECONDARY) {
+                prefs().edit().remove(KEY_DL_DIR).apply()
+                toast("Pasta: Transferências")
+            },
+            Triple("Fechar", BtnStyle.SECONDARY) {}
+        ).show()
+    }
+
+    private var pickAfterPermission = false
+
+    private fun chooseFolder() {
+        if (Build.VERSION.SDK_INT < 30) {
+            toast("Disponível no Android 11 ou mais recente")
+            return
         }
-        sh.card(
-            icon = "📂",
-            title = "Escolher outra pasta…",
-            detail = "Qualquer pasta do telemóvel ou do cartão",
-            onClick = {
-                val i = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).addFlags(
-                    Intent.FLAG_GRANT_READ_URI_PERMISSION or
-                        Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
-                        Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
-                )
+        if (hasAllFiles()) {
+            showFolderBrowser(dlDir() ?: java.io.File(Environment.getExternalStorageDirectory(), Environment.DIRECTORY_DOWNLOADS))
+        } else {
+            askAllFilesAccess()
+        }
+    }
+
+    @android.annotation.TargetApi(30)
+    private fun askAllFilesAccess() {
+        AlertDialog.Builder(this)
+            .setTitle(I18n.tr("Permissão necessária"))
+            .setMessage(
+                I18n.tr("Para guardar numa pasta à tua escolha, incluindo Transferências, o Android pede a permissão «Acesso a todos os ficheiros». A app usa-a só para guardar os teus downloads. Na página que se abre, ativa-a para o Gabriel Browser e volta.")
+            )
+            .setPositiveButton(I18n.tr("Abrir definições")) { _, _ ->
+                pickAfterPermission = true
                 try {
-                    startActivityForResult(i, REQ_FOLDER)
+                    startActivity(
+                        Intent(android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:$packageName"))
+                    )
                 } catch (e: Exception) {
-                    toast("Não foi possível abrir o seletor de pastas")
+                    try {
+                        startActivity(Intent(android.provider.Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
+                    } catch (e2: Exception) {
+                        pickAfterPermission = false
+                        toast("Não foi possível abrir as definições")
+                    }
                 }
             }
-        )
-        sh.note("Numa pasta escolhida a app guarda sem notificação de progresso (aparece um aviso quando termina). Só ligações https.")
-        sh.actions(Triple("Fechar", BtnStyle.SECONDARY) {}).show()
+            .setNegativeButton(I18n.tr("Cancelar"), null)
+            .show()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (pickAfterPermission) {
+            pickAfterPermission = false
+            if (hasAllFiles()) {
+                showFolderBrowser(java.io.File(Environment.getExternalStorageDirectory(), Environment.DIRECTORY_DOWNLOADS))
+            } else {
+                toast("Permissão não concedida")
+            }
+        }
+    }
+
+    /** Navegador de pastas: entra nas subpastas, sobe um nível e confirma com «Usar esta pasta». */
+    private fun showFolderBrowser(dir: java.io.File) {
+        val root = Environment.getExternalStorageDirectory()
+        val subs = (dir.listFiles { f -> f.isDirectory && !f.name.startsWith(".") } ?: emptyArray())
+            .sortedBy { it.name.lowercase() }
+            .take(200)
+        val sh = Sheet(this, "Escolher pasta", folderLabel(dir))
+        val parent = dir.parentFile
+        if (dir.path != root.path && parent != null && dir.path.startsWith(root.path)) {
+            sh.card(icon = "⬆", title = "Pasta acima", detail = folderLabel(parent), onClick = { showFolderBrowser(parent) })
+        }
+        subs.forEach { d -> sh.card(icon = "📁", title = d.name, onClick = { showFolderBrowser(d) }) }
+        if (subs.isEmpty()) sh.note("Sem subpastas")
+        sh.actions(
+            Triple("Usar esta pasta", BtnStyle.PRIMARY) {
+                if (dir.canWrite()) {
+                    prefs().edit().putString(KEY_DL_DIR, dir.path).apply()
+                    toast("Pasta de downloads: ${folderLabel(dir)}")
+                } else {
+                    toast("Não é possível guardar nesta pasta")
+                }
+            },
+            Triple("Nova pasta", BtnStyle.SECONDARY) { askNewFolder(dir) },
+            Triple("Cancelar", BtnStyle.SECONDARY) {}
+        ).show()
+    }
+
+    private fun askNewFolder(parent: java.io.File) {
+        val sh = Sheet(this, "Nova pasta", folderLabel(parent))
+        val input = sh.input("Nome da pasta")
+        sh.actions(
+            Triple("Cancelar", BtnStyle.SECONDARY) { showFolderBrowser(parent) },
+            Triple("Criar", BtnStyle.PRIMARY) {
+                val name = input.text.toString().trim()
+                    .replace(Regex("[\\\\/:*?\"<>|\\p{Cntrl}]"), "_").trim('.', ' ').take(80)
+                if (name.isEmpty()) {
+                    toast("Nome inválido")
+                    showFolderBrowser(parent)
+                } else {
+                    val d = java.io.File(parent, name)
+                    if (d.isDirectory || d.mkdirs()) showFolderBrowser(d)
+                    else {
+                        toast("Não foi possível criar a pasta")
+                        showFolderBrowser(parent)
+                    }
+                }
+            }
+        ).show()
     }
 
     // ---------------------------------------------------------------- ecrã inteiro
@@ -1800,36 +1981,129 @@ class MainActivity : Activity() {
         val url = currentUrl
         val faved = url?.let { u -> loadBookmarks().any { it.second == u } } == true
         Sheet(this, "Gabriel Browser", hostOf(url) ?: "Menu")
+            .section("Esta página")
             .tiles(
                 listOf(
                     Tile(if (faved) "★" else "☆", if (faved) "Nos favoritos" else "Favorito", faved) { toggleBookmark() },
-                    Tile("➕", "Novo separador") { openNewTab(null) },
-                    Tile("🗂", "Separadores") { showTabs() },
-                    Tile("📚", "Favoritos") { showBookmarks() },
-                    Tile("🕘", "Histórico") { showHistory() },
                     Tile("🔗", "Partilhar") { shareLink() },
                     Tile("📋", "Copiar link") { copyLink() },
-                    Tile("🛡", "Proteção") { showProtection() },
-                    Tile("📁", "Pasta") { showDownloadFolder() },
-                    Tile("🧹", "Limpar dados") { showClearData() },
-                    Tile("🕶", "Privado", privateMode) { togglePrivateMode() },
                     Tile("🖥", "Site PC", desktopMode) {
                         desktopMode = !desktopMode
                         applyDesktopMode(session)
                         appReload()
                     },
-                    Tile("🧩", "Extensões") { showExtensions() },
+                    Tile("🔍", "Pesquisar na página") { showFindBar() },
+                    Tile("📖", "Modo de leitura") { toggleReader() },
+                    Tile("📄", "Guardar PDF") { savePagePdf() },
+                    Tile("🖨", "Imprimir") { printPage() },
+                    Tile("🔠", "Texto") { showTextSize() }
+                ),
+                cols = 3
+            )
+            .section("Navegação")
+            .tiles(
+                listOf(
+                    Tile("➕", "Novo separador") { openNewTab(null) },
+                    Tile("🗂", "Separadores") { showTabs() },
+                    Tile("📚", "Favoritos") { showBookmarks() },
+                    Tile("🕘", "Histórico") { showHistory() }
+                ),
+                cols = 4
+            )
+            .section("Privacidade")
+            .tiles(
+                listOf(
+                    Tile("🛡", "Proteção") { showProtection() },
+                    Tile("🕶", "Privado", active.isPrivate) { togglePrivateMode() },
+                    Tile("🧹", "Limpar dados") { showClearData() },
+                    Tile("🔥", "Limpar tudo") { confirmFire() }
+                ),
+                cols = 4
+            )
+            .section("Ficheiros e extensões")
+            .tiles(
+                listOf(
+                    Tile("📂", "Abrir pasta") { openDownloads() },
+                    Tile("📁", "Pasta") { showDownloadFolder() },
+                    Tile("💾", "Backup") { showBackupMenu() },
+                    Tile("🧩", "Extensões") { showExtensions() }
+                ),
+                cols = 4
+            )
+            .section("Definições")
+            .tiles(
+                listOf(
                     Tile("🏠", "Página inicial") { showHomeSettings() },
                     Tile("🔎", "Pesquisa") { showEngineChooser() },
-                    Tile("🦠", "VirusTotal") { showVirusTotalSettings() },
                     Tile("🌐", "DNS") { showDnsSettings() },
                     Tile("🌍", "Idioma") { showLanguage() },
+                    Tile("⬇", "Barra em baixo", prefs().getBoolean(KEY_BAR_BOTTOM, false)) { toggleBarPosition() },
+                    Tile("🦠", "VirusTotal") { showVirusTotalSettings() },
                     Tile("ℹ", "Sobre") { showAbout() }
                 ),
                 cols = 4
             )
             .actions(Triple("Fechar", BtnStyle.SECONDARY) {})
             .show()
+    }
+
+    /**
+     * Abre no gestor de ficheiros a pasta de downloads em uso: a escolhida e, se não houver (ou se nenhuma app a
+     * conseguir abrir), a pasta Transferências do Android.
+     */
+    private fun openDownloads() {
+        val chosen = ArrayList<Intent>()
+        dlDir()?.let { dir ->
+            try {
+                val root = Environment.getExternalStorageDirectory().path
+                val docId = if (dir.path == root) "primary:" else "primary:" + dir.path.removePrefix("$root/")
+                val authority = "com.android.externalstorage.documents"
+                val uri = android.provider.DocumentsContract.buildDocumentUri(authority, docId)
+                fun view(pkg: String? = null): Intent =
+                    Intent(Intent.ACTION_VIEW)
+                        .setDataAndType(uri, android.provider.DocumentsContract.Document.MIME_TYPE_DIR)
+                        .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        .also { if (pkg != null) it.setPackage(pkg) }
+                if (dir.path.startsWith("$root/") || dir.path == root) {
+                    // Samsung "Os meus ficheiros": abre por caminho.
+                    chosen.add(
+                        Intent("samsung.myfiles.intent.action.LAUNCH_MY_FILES")
+                            .putExtra("samsung.myfiles.intent.extra.START_PATH", dir.path)
+                    )
+                }
+                chosen.add(view("com.google.android.documentsui"))
+                chosen.add(view("com.android.documentsui"))
+                chosen.add(view())
+            } catch (e: Exception) {
+                Log.w(TAG, "pasta escolhida inválida: $e")
+            }
+        }
+        for (i in chosen) {
+            try {
+                startActivity(i)
+                return
+            } catch (e: Exception) {
+                Log.w(TAG, "abrir pasta escolhida falhou: $e")
+            }
+        }
+        if (chosen.isNotEmpty()) toast("Não consegui abrir a pasta escolhida: a abrir Transferências")
+
+        val fallback = listOf(
+            Intent(DownloadManager.ACTION_VIEW_DOWNLOADS),
+            Intent(Intent.ACTION_VIEW).setDataAndType(
+                android.provider.DocumentsContract.buildRootUri("com.android.providers.downloads.documents", "downloads"),
+                "vnd.android.document/root"
+            )
+        )
+        for (i in fallback) {
+            try {
+                startActivity(i)
+                return
+            } catch (e: Exception) {
+                Log.w(TAG, "abrir Transferências falhou: $e")
+            }
+        }
+        toast("Não foi possível abrir a pasta")
     }
 
     private fun shareLink() {
@@ -2085,7 +2359,7 @@ class MainActivity : Activity() {
                 }),
                 actions = if (ext.isBuiltIn) emptyList() else listOf(Pair("🗑", {
                     ctl.uninstall(ext).accept(
-                        { toast("Extensão removida"); showExtensions() },
+                        { forgetExt(ext.id); toast("Extensão removida"); showExtensions() },
                         { toast("Falhou: ${it?.message}") }
                     )
                     Unit
@@ -2162,9 +2436,575 @@ class MainActivity : Activity() {
     private fun installExtension(url: String) {
         toast("A descarregar extensão…")
         rt.webExtensionController.install(url).accept(
-            { ext -> toast("Instalada: ${ext?.metaData?.name ?: "extensão"}"); appReload() },
+            { ext ->
+                if (ext != null) rememberExt(ext.id, url)
+                toast("Instalada: ${ext?.metaData?.name ?: "extensão"}"); appReload()
+            },
             { Log.w(TAG, "Falha ao instalar extensão: $it"); toast("Não foi possível instalar: ${it?.message}") }
         )
+    }
+
+    // ---------------------------------------------------------------- backup, restauro e reposição
+
+    /** Mapa id → link .xpi das extensões instaladas pelo utilizador (para o backup). */
+    private fun loadExtMap(): JSONObject =
+        try { JSONObject(prefs().getString(KEY_EXTS, "{}") ?: "{}") } catch (e: Exception) { JSONObject() }
+
+    private fun rememberExt(id: String, url: String) {
+        try {
+            val m = loadExtMap()
+            m.put(id, url)
+            prefs().edit().putString(KEY_EXTS, m.toString()).apply()
+        } catch (e: Exception) { Log.w(TAG, "rememberExt: $e") }
+    }
+
+    private fun forgetExt(id: String) {
+        try {
+            val m = loadExtMap()
+            m.remove(id)
+            prefs().edit().putString(KEY_EXTS, m.toString()).apply()
+        } catch (e: Exception) { Log.w(TAG, "forgetExt: $e") }
+    }
+
+    private fun showBackupMenu() {
+        Sheet(this, "Backup e reposição", "Definições, favoritos, histórico e extensões")
+            .card("💾", "Criar backup", "Guarda em Documentos/GabrielBrowser", onClick = { showBackupOptions() })
+            .card("📥", "Restaurar backup", "Lê um ficheiro de backup", onClick = { pickBackupFile() })
+            .card("♻", "Repor a app", "Apaga tudo e volta ao estado inicial", onClick = { confirmReset() })
+            .note("Cookies, sessões e dados dos sites não entram no backup. As definições internas do uBlock Origin guardam-se no próprio painel do uBlock (Backup para ficheiro).")
+            .actions(Triple("Fechar", BtnStyle.SECONDARY) {})
+            .show()
+    }
+
+    private fun showBackupOptions() {
+        val sh = Sheet(this, "Criar backup", "Escolhe o que incluir")
+        sh.note("Inclui: DNS, motor de pesquisa, página inicial, idioma, favoritos, histórico, pasta de downloads e extensões instaladas.")
+        val nameIn = sh.input("Nome do ficheiro")
+        nameIn.setText("gabriel-backup-" +
+            java.text.SimpleDateFormat("yyyyMMdd-HHmm", java.util.Locale.US).format(java.util.Date()))
+        val cKey = sh.check("🔑  Incluir a chave do VirusTotal", false)
+        sh.note("O ficheiro de backup é texto simples. Se incluíres a chave, guarda-o num local seguro.")
+        sh.actions(
+            Triple("Cancelar", BtnStyle.SECONDARY) {},
+            Triple("Criar", BtnStyle.PRIMARY) { writeBackup(cKey.isChecked, nameIn.text.toString()) }
+        ).show()
+    }
+
+    private fun buildBackup(withKey: Boolean): String {
+        val p = prefs()
+        val data = JSONObject()
+        val all = p.all
+        for (k in BACKUP_KEYS) {
+            if (k == KEY_VT_KEY && !withKey) continue
+            val v = all[k] ?: continue
+            when (v) {
+                is String, is Int, is Boolean -> data.put(k, v)
+            }
+        }
+        val exts = JSONArray()
+        val m = loadExtMap()
+        m.keys().forEach { id ->
+            val u = m.optString(id)
+            if (u.startsWith("https://")) exts.put(JSONObject().put("id", id).put("url", u))
+        }
+        val version = try { packageManager.getPackageInfo(packageName, 0).versionName } catch (e: Exception) { "?" }
+        return JSONObject()
+            .put("app", "pt.gabriel.browser")
+            .put("format", 1)
+            .put("appVersion", version)
+            .put("created", System.currentTimeMillis())
+            .put("prefs", data)
+            .put("extensions", exts)
+            .toString(2)
+    }
+
+    /** Grava em Documentos/GabrielBrowser (fora da app, sobrevive a desinstalar/repor). */
+    private fun writeBackup(withKey: Boolean, rawName: String) {
+        var base = rawName.trim().removeSuffix(".json").replace(Regex("[\\\\/:*?\"<>|\\p{Cntrl}]"), "_").trim('.', ' ')
+        if (base.isEmpty()) base = "gabriel-backup"
+        val name = base.take(80) + ".json"
+        val bytes = try { buildBackup(withKey).toByteArray(Charsets.UTF_8) } catch (e: Exception) {
+            toast("Não foi possível guardar o backup"); return
+        }
+        Thread {
+            try {
+                var done = false
+                if (hasAllFiles()) {
+                    try {
+                        val dir = java.io.File(
+                            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS), BACKUP_DIR)
+                        if (dir.isDirectory || dir.mkdirs()) {
+                            val f = uniqueFile(dir, name)
+                            f.writeBytes(bytes)
+                            android.media.MediaScannerConnection.scanFile(this, arrayOf(f.path), arrayOf("application/json"), null)
+                            done = true
+                        }
+                    } catch (e: Exception) { Log.w(TAG, "backup via ficheiro: $e") }
+                }
+                if (!done) {
+                    val cv = ContentValues().apply {
+                        put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+                        put(MediaStore.MediaColumns.MIME_TYPE, "application/json")
+                        put(MediaStore.MediaColumns.RELATIVE_PATH, "Documents/$BACKUP_DIR")
+                    }
+                    val uri = contentResolver.insert(MediaStore.Files.getContentUri("external"), cv)
+                        ?: throw java.io.IOException("insert")
+                    contentResolver.openOutputStream(uri)?.use { it.write(bytes) } ?: throw java.io.IOException("out")
+                }
+                toast("Backup guardado em Documentos/GabrielBrowser")
+            } catch (e: Exception) {
+                Log.w(TAG, "backup falhou: $e")
+                toast("Não foi possível guardar o backup")
+            }
+        }.start()
+    }
+
+    private fun pickBackupFile() {
+        val i = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+            if (Build.VERSION.SDK_INT >= 26) putExtra(
+                android.provider.DocumentsContract.EXTRA_INITIAL_URI,
+                Uri.parse("content://com.android.externalstorage.documents/document/primary%3ADocuments%2F$BACKUP_DIR"))
+        }
+        try { startActivityForResult(i, REQ_RESTORE) } catch (e: Exception) { toast("Não foi possível abrir o seletor de ficheiros") }
+    }
+
+    private fun readBackup(uri: Uri) {
+        Thread {
+            val root: JSONObject
+            try {
+                val bytes = contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: throw java.io.IOException()
+                if (bytes.size > 5 * 1024 * 1024) throw java.io.IOException("grande")
+                root = JSONObject(String(bytes, Charsets.UTF_8))
+                if (root.optString("app") != "pt.gabriel.browser" || root.optInt("format", 0) != 1) throw IllegalArgumentException()
+            } catch (e: Exception) {
+                Log.w(TAG, "restauro: ficheiro inválido: $e")
+                toast("Ficheiro de backup inválido")
+                return@Thread
+            }
+            runOnUiThread { confirmRestore(root) }
+        }.start()
+    }
+
+    private fun confirmRestore(root: JSONObject) {
+        val n = root.optJSONArray("extensions")?.length() ?: 0
+        Sheet(this, "Restaurar backup?", "As definições atuais serão substituídas")
+            .text(if (n > 0) "Vão ser restaurados as definições, favoritos e histórico do backup e reinstaladas as extensões guardadas."
+                else "Vão ser restaurados as definições, favoritos e histórico do backup")
+            .note("A app reinicia no fim.")
+            .actions(
+                Triple("Cancelar", BtnStyle.SECONDARY) {},
+                Triple("Restaurar", BtnStyle.PRIMARY) { applyRestore(root) }
+            ).show()
+    }
+
+    private fun applyRestore(root: JSONObject) {
+        val data = root.optJSONObject("prefs") ?: JSONObject()
+        val ed = prefs().edit()
+        for (k in BACKUP_KEYS) {
+            if (!data.has(k)) continue
+            val v = data.opt(k)
+            when {
+                (k == KEY_ENGINE || k == KEY_ZOOM) && v is Int -> ed.putInt(k, if (k == KEY_ZOOM) v.coerceIn(50, 200) else v)
+                (k == KEY_HISTORY_ON || k == KEY_VT_AUTO || k == KEY_BAR_BOTTOM) && v is Boolean -> ed.putBoolean(k, v)
+                k != KEY_ENGINE && k != KEY_ZOOM && k != KEY_HISTORY_ON && k != KEY_VT_AUTO && k != KEY_BAR_BOTTOM &&
+                    v is String && v.length < 2_000_000 -> ed.putString(k, v)
+            }
+        }
+        ed.commit()
+        val urls = ArrayList<String>()
+        val arr = root.optJSONArray("extensions")
+        if (arr != null) for (n in 0 until arr.length()) {
+            val u = arr.optJSONObject(n)?.optString("url").orEmpty()
+            if (u.startsWith("https://")) urls.add(u)
+        }
+        toast("Backup restaurado")
+        installAll(urls, 0)
+    }
+
+    private fun installAll(urls: List<String>, idx: Int) {
+        if (idx >= urls.size) {
+            runOnUiThread { restartApp("A reiniciar para aplicar o backup…") }
+            return
+        }
+        toast("A reinstalar extensões…")
+        try {
+            rt.webExtensionController.install(urls[idx]).accept(
+                { ext -> if (ext != null) rememberExt(ext.id, urls[idx]); installAll(urls, idx + 1) },
+                { Log.w(TAG, "restauro: extensão falhou: $it"); installAll(urls, idx + 1) }
+            )
+        } catch (e: Exception) {
+            installAll(urls, idx + 1)
+        }
+    }
+
+    private fun confirmReset() {
+        Sheet(this, "Repor a app?", "Volta ao estado inicial")
+            .text("Apaga definições, favoritos, histórico, extensões instaladas, cookies e dados dos sites. O uBlock Origin embutido mantém-se.")
+            .note("Cria primeiro um backup se quiseres restaurar mais tarde.")
+            .actions(
+                Triple("Cancelar", BtnStyle.SECONDARY) {},
+                Triple("Criar backup", BtnStyle.PRIMARY) { showBackupOptions() },
+                Triple("Repor", BtnStyle.DANGER) { doReset() }
+            ).show()
+    }
+
+    private fun doReset() {
+        prefs().edit().clear().commit()
+        val finish = {
+            rt.storageController.clearData(StorageController.ClearFlags.ALL).accept(
+                { runOnUiThread { restartApp("A reiniciar…") } },
+                { runOnUiThread { restartApp("A reiniciar…") } }
+            )
+            Unit
+        }
+        try {
+            rt.webExtensionController.list().accept(
+                { list ->
+                    val user = (list ?: emptyList()).filter { !it.isBuiltIn }
+                    if (user.isEmpty()) finish() else {
+                        var left = user.size
+                        user.forEach { e ->
+                            rt.webExtensionController.uninstall(e).accept(
+                                { if (--left == 0) finish() },
+                                { if (--left == 0) finish() }
+                            )
+                        }
+                    }
+                },
+                { finish() }
+            )
+        } catch (e: Exception) {
+            finish()
+        }
+    }
+
+    // ---------------------------------------------------------------- ferramentas da página
+
+    private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+
+    private var findBar: LinearLayout? = null
+    private var findInput: EditText? = null
+    private var findCount: TextView? = null
+
+    private fun buildFindBar(): LinearLayout {
+        val bar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            setBackgroundColor(getColor(R.color.surface))
+            setPadding(dp(12), dp(4), dp(4), dp(4))
+        }
+        val input = EditText(this).apply {
+            hint = I18n.tr("Pesquisar na página")
+            setSingleLine()
+            imeOptions = EditorInfo.IME_ACTION_SEARCH
+            setTextColor(getColor(R.color.text))
+            setHintTextColor(getColor(R.color.text_secondary))
+            background = null
+            addTextChangedListener(object : android.text.TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, st: Int, c: Int, a: Int) {}
+                override fun onTextChanged(s: CharSequence?, st: Int, b: Int, c: Int) {}
+                override fun afterTextChanged(s: android.text.Editable?) { doFind(false) }
+            })
+            setOnEditorActionListener { _, id, _ ->
+                if (id == EditorInfo.IME_ACTION_SEARCH) { doFind(false); true } else false
+            }
+        }
+        val count = TextView(this).apply {
+            setTextColor(getColor(R.color.text_secondary))
+            setPadding(dp(6), 0, dp(6), 0)
+        }
+        fun btn(label: String, desc: String, click: () -> Unit) = TextView(this).apply {
+            text = label
+            textSize = 20f
+            setTextColor(getColor(R.color.text))
+            gravity = android.view.Gravity.CENTER
+            contentDescription = I18n.tr(desc)
+            minimumWidth = dp(44)
+            minimumHeight = dp(44)
+            setOnClickListener { click() }
+        }
+        bar.addView(input, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        bar.addView(count)
+        bar.addView(btn("▲", "Anterior") { doFind(true) })
+        bar.addView(btn("▼", "Seguinte") { doFind(false) })
+        bar.addView(btn("✕", "Fechar") { hideFindBar() })
+        findInput = input
+        findCount = count
+        return bar
+    }
+
+    private fun showFindBar() {
+        var bar = findBar
+        if (bar == null) {
+            bar = buildFindBar()
+            findBar = bar
+            val root = geckoView.parent as LinearLayout
+            root.addView(bar, root.indexOfChild(geckoView) + 1)
+        }
+        bar.visibility = View.VISIBLE
+        try { session.finder.setDisplayFlags(GeckoSession.FINDER_DISPLAY_HIGHLIGHT_ALL) } catch (e: Throwable) { Log.w(TAG, "finder: $e") }
+        findInput?.let {
+            it.requestFocus()
+            it.post { (getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager).showSoftInput(it, 0) }
+        }
+    }
+
+    private fun hideFindBar() {
+        val bar = findBar ?: return
+        if (bar.visibility != View.VISIBLE) return
+        bar.visibility = View.GONE
+        findInput?.setText("")
+        findCount?.text = ""
+        try { session.finder.clear() } catch (e: Throwable) { Log.w(TAG, "finder clear: $e") }
+        try {
+            (getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager)
+                .hideSoftInputFromWindow(bar.windowToken, 0)
+        } catch (e: Exception) { }
+    }
+
+    private fun doFind(backwards: Boolean) {
+        val text = findInput?.text?.toString().orEmpty()
+        if (text.isEmpty()) {
+            findCount?.text = ""
+            try { session.finder.clear() } catch (e: Throwable) { }
+            return
+        }
+        try {
+            session.finder.find(text, if (backwards) GeckoSession.FINDER_FIND_BACKWARDS else 0).accept(
+                { r ->
+                    runOnUiThread {
+                        findCount?.text = when {
+                            r == null || !r.found -> I18n.tr("Sem resultados")
+                            r.total > 0 -> "${r.current}/${r.total}"
+                            else -> "${r.current}"
+                        }
+                    }
+                },
+                { Log.w(TAG, "find falhou: $it") }
+            )
+        } catch (e: Throwable) {
+            Log.w(TAG, "find: $e")
+        }
+    }
+
+    private fun toggleReader() {
+        val url = currentUrl
+        if (url == null || !url.startsWith("http")) {
+            toast("Modo de leitura indisponível nesta página")
+            return
+        }
+        val port = active.readerPort
+        if (port == null) {
+            toast("Modo de leitura indisponível nesta página")
+            return
+        }
+        try {
+            port.postMessage(JSONObject().put("cmd", "reader"))
+        } catch (e: Exception) {
+            Log.w(TAG, "reader: $e")
+            toast("Não foi possível abrir o modo de leitura")
+        }
+    }
+
+    private fun savePagePdf() {
+        val url = currentUrl
+        if (url == null || !url.startsWith("http")) {
+            toast("Só páginas http(s) podem ser guardadas em PDF")
+            return
+        }
+        val base = (active.title?.trim().takeUnless { it.isNullOrEmpty() } ?: hostOf(url) ?: "pagina")
+            .replace(Regex("[\\\\/:*?\"<>|\\p{Cntrl}]"), "_").trim('.', ' ').take(80).ifEmpty { "pagina" }
+        toast("A criar PDF…")
+        try {
+            session.saveAsPdf().accept(
+                { stream ->
+                    if (stream == null) toast("Não foi possível criar o PDF")
+                    else saveStream(stream, url, "attachment; filename=\"$base.pdf\"", "application/pdf")
+                },
+                { Log.w(TAG, "pdf falhou: $it"); toast("Não foi possível criar o PDF") }
+            )
+        } catch (e: Throwable) {
+            Log.w(TAG, "pdf: $e")
+            toast("Não foi possível criar o PDF")
+        }
+    }
+
+    /**
+     * Imprimir: gera um PDF da página (motor do Gecko) e entrega-o ao serviço de impressão do Android,
+     * o mesmo diálogo do Firefox e do Chrome (impressora, cópias, papel, páginas, "Guardar como PDF").
+     */
+    private fun printPage() {
+        val url = currentUrl
+        if (url == null || !url.startsWith("http")) {
+            toast("Só páginas http(s) podem ser impressas")
+            return
+        }
+        val jobName = (active.title?.trim().takeUnless { it.isNullOrEmpty() } ?: hostOf(url) ?: "pagina").take(80)
+        toast("A preparar impressão…")
+        try {
+            session.saveAsPdf().accept(
+                { stream ->
+                    if (stream == null) {
+                        toast("Não foi possível imprimir")
+                    } else {
+                        Thread {
+                            try {
+                                val f = java.io.File(cacheDir, "print-${System.currentTimeMillis()}.pdf")
+                                stream.use { input -> f.outputStream().use { out -> input.copyTo(out) } }
+                                runOnUiThread { startPrintJob(f, jobName) }
+                            } catch (e: Exception) {
+                                Log.w(TAG, "imprimir: preparar PDF falhou: $e")
+                                toast("Não foi possível imprimir")
+                            }
+                        }.start()
+                    }
+                },
+                { Log.w(TAG, "imprimir: PDF falhou: $it"); toast("Não foi possível imprimir") }
+            )
+        } catch (e: Throwable) {
+            Log.w(TAG, "imprimir: $e")
+            toast("Não foi possível imprimir")
+        }
+    }
+
+    private fun startPrintJob(file: java.io.File, jobName: String) {
+        try {
+            val pm = getSystemService(Context.PRINT_SERVICE) as android.print.PrintManager
+            pm.print(jobName, PdfPrintAdapter(file, jobName), null)
+        } catch (e: Exception) {
+            Log.w(TAG, "imprimir: PrintManager falhou: $e")
+            file.delete()
+            toast("Não foi possível imprimir")
+        }
+    }
+
+    /** Entrega ao Android um PDF já pronto (copia-o tal e qual para o destino). */
+    private class PdfPrintAdapter(private val file: java.io.File, private val name: String) :
+        android.print.PrintDocumentAdapter() {
+
+        override fun onLayout(
+            oldAttributes: android.print.PrintAttributes?,
+            newAttributes: android.print.PrintAttributes,
+            cancellationSignal: android.os.CancellationSignal?,
+            callback: LayoutResultCallback,
+            extras: Bundle?
+        ) {
+            if (cancellationSignal?.isCanceled == true) {
+                callback.onLayoutCancelled()
+                return
+            }
+            val info = android.print.PrintDocumentInfo.Builder("$name.pdf")
+                .setContentType(android.print.PrintDocumentInfo.CONTENT_TYPE_DOCUMENT)
+                .setPageCount(android.print.PrintDocumentInfo.PAGE_COUNT_UNKNOWN)
+                .build()
+            callback.onLayoutFinished(info, oldAttributes != newAttributes)
+        }
+
+        override fun onWrite(
+            pages: Array<out android.print.PageRange>,
+            destination: android.os.ParcelFileDescriptor,
+            cancellationSignal: android.os.CancellationSignal?,
+            callback: WriteResultCallback
+        ) {
+            Thread {
+                try {
+                    java.io.FileInputStream(file).use { input ->
+                        java.io.FileOutputStream(destination.fileDescriptor).use { out ->
+                            val buf = ByteArray(64 * 1024)
+                            while (true) {
+                                if (cancellationSignal?.isCanceled == true) {
+                                    callback.onWriteCancelled()
+                                    return@Thread
+                                }
+                                val n = input.read(buf)
+                                if (n < 0) break
+                                out.write(buf, 0, n)
+                            }
+                        }
+                    }
+                    callback.onWriteFinished(arrayOf(android.print.PageRange.ALL_PAGES))
+                } catch (e: Exception) {
+                    callback.onWriteFailed(e.toString())
+                }
+            }.start()
+        }
+
+        override fun onFinish() {
+            try { file.delete() } catch (e: Exception) { }
+        }
+    }
+
+    private fun showTextSize() {
+        val pct = prefs().getInt(KEY_ZOOM, 100).coerceIn(50, 200)
+        fun set(v: Int) {
+            val n = v.coerceIn(50, 200)
+            prefs().edit().putInt(KEY_ZOOM, n).apply()
+            try { rt.settings.setFontSizeFactor(n / 100f) } catch (e: Throwable) { Log.w(TAG, "zoom: $e") }
+            showTextSize()
+        }
+        Sheet(this, "Tamanho do texto", "$pct%")
+            .note("Aplica-se a todas as páginas. Se não mudar logo, recarrega a página.")
+            .actions(
+                Triple("A−", BtnStyle.SECONDARY) { set(pct - 10) },
+                Triple("100%", BtnStyle.SECONDARY) { set(100) },
+                Triple("A+", BtnStyle.SECONDARY) { set(pct + 10) },
+                Triple("Fechar", BtnStyle.PRIMARY) {}
+            ).show()
+    }
+
+    private fun confirmFire() {
+        Sheet(this, "Limpar tudo?", "Começa de novo, num só passo")
+            .text("Fecha todos os separadores e apaga cookies, cache, dados de sites e histórico. Os favoritos e as definições mantêm-se.")
+            .actions(
+                Triple("Cancelar", BtnStyle.SECONDARY) {},
+                Triple("Limpar tudo", BtnStyle.DANGER) { doFire() }
+            ).show()
+    }
+
+    private fun doFire() {
+        prefs().edit().remove(KEY_HISTORY).apply()
+        val flags = StorageController.ClearFlags.COOKIES or StorageController.ClearFlags.NETWORK_CACHE or
+            StorageController.ClearFlags.IMAGE_CACHE or StorageController.ClearFlags.DOM_STORAGES
+        val finish = {
+            runOnUiThread {
+                hideFindBar()
+                val old = tabs.toList()
+                tabs.clear()
+                old.forEach {
+                    try { it.session.close() } catch (e: Exception) { Log.w(TAG, "close falhou: $e") }
+                }
+                openNewTab(null, true, false)
+                toast("Tudo limpo")
+            }
+        }
+        try {
+            rt.storageController.clearData(flags).accept({ finish() }, { finish() })
+        } catch (e: Exception) {
+            finish()
+        }
+    }
+
+    private fun toggleBarPosition() {
+        prefs().edit().putBoolean(KEY_BAR_BOTTOM, !prefs().getBoolean(KEY_BAR_BOTTOM, false)).apply()
+        applyBarPosition()
+    }
+
+    /** Barra de endereço em cima (predefinição) ou em baixo, junto aos botões. */
+    private fun applyBarPosition() {
+        val root = topBar.parent as? LinearLayout ?: return
+        val bottom = prefs().getBoolean(KEY_BAR_BOTTOM, false)
+        root.removeView(topBar)
+        root.removeView(progress)
+        if (bottom) {
+            val d = root.indexOfChild(divider)
+            root.addView(progress, d)
+            root.addView(topBar, root.indexOfChild(bottomBar))
+        } else {
+            root.addView(topBar, 0)
+            root.addView(progress, 1)
+        }
     }
 
     private fun showAbout() {
@@ -2189,8 +3029,8 @@ class MainActivity : Activity() {
             .show()
     }
 
-    private fun restartApp() {
-        toast("A reiniciar para aplicar o DNS…")
+    private fun restartApp(msg: String = "A reiniciar para aplicar o DNS…") {
+        toast(msg)
         finishAndRemoveTask()
         Process.killProcess(Process.myPid())
     }

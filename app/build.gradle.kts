@@ -21,14 +21,18 @@ android {
     namespace = "pt.gabriel.browser"
     // O GeckoView 159+ (e o androidx.core 1.19) exigem compilar contra a API 37.
     // Isto não muda o comportamento da app (targetSdk) nem os aparelhos suportados (minSdk).
-    compileSdk = 37
+    compileSdk {
+        version = release(37) {
+            minorApiLevel = 2
+        }
+    }
 
     defaultConfig {
         applicationId = "pt.gabriel.browser"
         minSdk = 29
         targetSdk = 35
-        versionCode = 2026111301
-        versionName = "1.1"
+        versionCode = 2026111372
+        versionName = "1.0-gv160"
 
         // Só arm64 (quase todos os telemóveis recentes): reduz muito o tamanho do APK.
         // Se o teu aparelho for de 32 bits, acrescenta "armeabi-v7a".

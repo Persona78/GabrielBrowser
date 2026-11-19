@@ -74,7 +74,7 @@ Gabriel Browser blocks ads, trackers, pop-ups and silent redirects, forces HTTPS
 Download the APK from the **Releases** page of this repository, open it on the phone and allow installation from that source when Android asks. To update, install the new APK **over** the old one: it must be signed with the **same key** and have a higher `versionCode`, otherwise Android refuses the update (or asks you to uninstall first, which erases the app's data).
 
 ### Build from source
-You need a recent **Android Studio** (Panda 3 / 2025.3.3 or newer, because of `compileSdk` 37) with JDK 17. The project uses AGP 9.1.1 and Gradle 9.3.1, which Android Studio downloads by itself.
+You need a recent **Android Studio** (Panda 3 / 2025.3.3 or newer, because of `compileSdk` 37.2, which you install in the SDK Manager) with JDK 17. The project uses AGP 9.1.1 and Gradle 9.3.1, which Android Studio downloads by itself.
 
 1. Open the project folder in Android Studio and let Gradle sync.
 2. Fetch uBlock Origin into `app/src/main/assets/ublock`: `./scripts/update-ublock.sh` (on Windows use Git Bash or WSL: `bash scripts/update-ublock.sh`). Without it the app still runs, just without ad blocking from uBlock.
@@ -111,34 +111,45 @@ If a GeckoView method fails to compile, the API names change between versions: c
 - The Back button goes back in the page; when a tab has nothing to go back to and other tabs exist, Back closes it.
 - Up to 12 tabs can be open. Each tab keeps its own page, tracker counter and loading state.
 - A link that opens a "new window" after you tap it opens in a new tab. Pop-ups that appear without a tap are blocked.
-- Turning **Private** mode on or off closes all tabs and starts one fresh tab.
+- **Private** mode works per tab: **Menu > Private** opens a new private tab (or a new normal tab when you are in a private one) and **keeps your other tabs open**. Private tabs are marked with 🕶 in the tab list.
 - Tabs are not restored when the app is closed.
 
 ### 3.2 The menu
 
 Tap the menu button (bottom right) to open a bottom sheet of tiles. Tiles that are switched on are highlighted in green.
 
-| Tile | What it does |
-|---|---|
-| **New tab** | Opens a new tab on your home page. |
-| **Tabs** | Lists open tabs. |
-| **☆ Bookmark / ★ Bookmarked** | Adds or removes the current page from your bookmarks. |
-| **Bookmarks** | Opens the bookmark list. |
-| **History** | Opens the history list and its on/off switch. |
-| **Share** | Shares the current link **without tracking parameters**. |
-| **Copy link** | Copies the current link without tracking parameters. |
-| **Protection** | Shows what is protecting you on this page. |
-| **Folder** | Chooses where downloads are saved. |
-| **Clear data** | Deletes browsing data you choose. |
-| **Private** | Turns private mode on or off. |
-| **Desktop site** | Requests the desktop version of sites. |
-| **Extensions** | Manages extensions. |
-| **Home page** | Sets your home page. |
-| **Search** | Chooses the search engine. |
-| **VirusTotal** | Sets up automatic scanning of suspicious sites. |
-| **DNS** | Sets the DNS-over-HTTPS server. |
-| **Language** | Chooses the app language. |
-| **About** | Version, a short description and a shortcut to **VirusTotal**. |
+The tiles are grouped in five sections.
+
+| Section | Tile | What it does |
+|---|---|---|
+| This page | **☆ Bookmark / ★ Bookmarked** | Adds or removes the current page from your bookmarks. |
+| | **Share** | Shares the current link **without tracking parameters**. |
+| | **Copy link** | Copies the current link without tracking parameters. |
+| | **Desktop site** | Requests the desktop version of sites. |
+| | **Find in page** | Search bar with match counter and next/previous (3.8i). |
+| | **Reader mode** | Clean, readable version of an article (3.8i). |
+| | **Print** | Opens Android's print dialog (printer, copies, paper size, pages, or "Save as PDF"), like Firefox and Chrome. |
+| | **Save PDF** | Saves the page as a PDF in your download folder. |
+| | **Text** | Text size from 50% to 200%. |
+| Browsing | **New tab** | Opens a new tab on your home page. |
+| | **Tabs** | Lists open tabs. |
+| | **Bookmarks** | Opens the bookmark list. |
+| | **History** | Opens the history list and its on/off switch. |
+| Privacy | **Protection** | Shows what is protecting you on this page. |
+| | **Private** | Turns private mode on or off. |
+| | **Clear data** | Deletes browsing data you choose. |
+| | **Clear everything** | One tap: closes all tabs and deletes cookies, cache, site data and history. |
+| Files and extensions | **Open folder** | Opens in the file manager the folder where your downloads are saved: the one you chose, or Android's Downloads if you did not choose one (or if no file manager can open the chosen folder). |
+| | **Folder** | Chooses where downloads are saved. |
+| | **Backup** | Creates, restores or resets (see 3.8g). |
+| | **Extensions** | Manages extensions. |
+| Settings | **Home page** | Sets your home page. |
+| | **Search** | Chooses the search engine. |
+| | **DNS** | Sets the DNS-over-HTTPS server. |
+| | **Language** | Chooses the app language. |
+| | **Bar at bottom** | Moves the address bar to the bottom, above the buttons. |
+| | **VirusTotal** | Sets up automatic scanning of suspicious sites. |
+| | **About** | Version, a short description and a shortcut to **VirusTotal**. |
 
 ### 3.3 Bookmarks
 
@@ -155,9 +166,9 @@ Tap the menu button (bottom right) to open a bottom sheet of tiles. Tiles that a
 
 ### 3.5 Private mode
 
-- **Menu > Private** turns it on or off. Switching starts a fresh session and goes to your home page.
-- While it is on: the engine keeps no history and no persistent cookies, the app's history is not recorded, the address bar shows "🕶 Private", the app is hidden from the recent-apps screen, and **screenshots are blocked**.
-- The app always starts in normal mode.
+- **Menu > Private** opens a new private tab and leaves your normal tabs untouched. Used from a private tab, it opens a new normal tab instead. New tabs opened from a private tab are private too.
+- In a private tab: the engine keeps no history and no persistent cookies, the app's history is not recorded, the address bar shows "🕶 Private", and, while a private tab is on screen, the app is hidden from the recent-apps screen and **screenshots are blocked**. Private tabs are not closed automatically: close them yourself or use **Clear everything**.
+- The app always starts with a normal tab.
 - Private mode does **not** hide your activity from your internet provider or DNS server.
 
 ### 3.6 Clear data
@@ -197,12 +208,15 @@ Notes:
 
 ### 3.8c Download folder
 
-**Menu > Folder** sets where every download is saved (long press, the ⬇ button and normal downloads).
-- **Downloads** (default): Android's Downloads folder.
-- **Choose another folder…** opens Android's folder picker; pick any folder on the phone or on the SD card and the app remembers it.
-- **Tapping a download link on a page:** the browser engine fetches the file (with the page's sign-in and the in-app DNS) and the app saves it, in Downloads or in your chosen folder. There is no progress notification, only a message when it finishes.
-- **Long press and the ⬇ button:** in Downloads you get Android's normal download notification; in a chosen folder the app downloads it itself (no progress notification). Only **https** links; if the chosen folder is no longer available it falls back to Downloads.
-- Files with the same name are not overwritten; Android adds a number.
+**Menu > Folder** sets where downloads are saved, and **Menu > Open folder** opens that folder in your file manager.
+- **Default:** Android's **Downloads** folder.
+- **Choose folder:** Android needs the **All files access** permission to let an app save into any folder, including Downloads itself (Android's own folder picker cannot choose the phone's root, an SD card's root or the Download folder). The app explains this, opens the Android settings page where you turn the permission on for Gabriel Browser, and then shows a simple folder browser: open folders, go up, create a **New folder**, and tap **Use this folder**.
+- **Default** (button): goes back to Android's Downloads folder.
+- The permission is used only to save your downloads in the chosen folder. If you turn it off later, or the folder disappears, the app warns you and saves in Downloads.
+- Needs Android 11 or newer; on Android 10 downloads always go to Downloads.
+- **Tapping a download link on a page:** the browser engine fetches the file (with the page's sign-in and the in-app DNS) and the app saves it. There is no progress notification, only a message when it finishes.
+- **Long press and the ⬇ button:** in Downloads you get Android's normal download notification; in a chosen folder the app downloads it itself (no progress notification). Only **https** links.
+- Files with the same name are not overwritten: the app adds a number, for example `file (1).pdf`.
 
 ### 3.8d File check (does the file match its extension?)
 
@@ -221,6 +235,33 @@ When a site asks for the **location**, the **camera** or the **microphone**, the
 ### 3.8f Web page dialogs and sign-in
 
 Pages can show their own dialogs and the app handles them with standard Android dialogs: **alert** (OK), **confirm** (OK / Cancel), **prompt** (text box), **drop-down lists** (`<select>`, single or multiple choice) and **HTTP sign-in** (user name and password, for example a router). Closing a dialog with Back or by tapping outside counts as Cancel. **File upload** opens Android's file picker. Date, time and color pickers are not supported yet.
+
+### 3.8i Page tools
+
+- **Find in page:** type in the bar that appears above the buttons; all matches are highlighted and the counter shows *current/total*. ▲ and ▼ jump between matches, ✕ closes the bar.
+- **Reader mode:** shows the main text and images of an article on a clean background that follows your light/dark setting. It is built by the built-in media extension, so it needs that extension enabled. Tap **Reader mode** again to go back. It works on articles; on pages without a clear main text it tells you it is not available.
+- **Print:** builds a PDF of the page and hands it to Android's print service, so you get the same dialog as in Chrome or Firefox: choose a printer, copies, colour, paper size, orientation and page range, or pick *Save as PDF*. You need a print service (for example the one from your printer's maker) or a Wi-Fi printer on the same network; without one you can still choose *Save as PDF*.
+- **Save PDF:** creates a PDF of the page with the engine's own printing and saves it in your download folder.
+- **Text size:** 50% to 200% for all pages (saved and included in backups).
+- **Clear everything:** closes every tab, then deletes cookies, cache, site data and history. Bookmarks and settings stay.
+- **Bar at bottom:** puts the address bar just above the navigation buttons; easier to reach with one hand. Saved and included in backups.
+- **Local network:** if a site asks to reach devices on your local network or services on your phone, the app asks first. The default is to ask every time.
+
+### 3.8h Connection warnings
+
+When a page cannot be opened safely the app shows a warning page instead of a blank screen.
+- **Your connection is not private** (invalid, expired or untrusted certificate): tap **Back to safety**, or **Advanced > Continue to … (unsafe)** to accept the risk for that visit only. Sites that enforce HSTS cannot be bypassed.
+- **This site does not support HTTPS:** because the app is HTTPS-only, you can choose **Continue without HTTPS** for that visit.
+- **Other errors** (no network, server not found…): shows the error code and a **Reload** button.
+
+### 3.8g Backup, restore and reset
+
+**Menu > Backup** opens three options.
+- **Create backup:** saves a `.json` file (name suggested as `gabriel-backup-YYYYMMDD-HHmm`, editable) in **Documents/GabrielBrowser**, outside the app, so it survives a reset or uninstall. It contains DNS, search engine, home page, language, bookmarks, history, download folder and the extensions you installed (as their download links). The VirusTotal key is included only if you tick the box; the file is plain text, so keep it safe.
+- **Restore backup:** pick a backup file. The settings are replaced, the saved extensions are reinstalled (you confirm their permissions again) and the app restarts.
+- **Reset app:** erases settings, bookmarks, history, user-installed extensions, cookies and site data, then restarts. The built-in uBlock Origin stays. Create a backup first if you want to restore later.
+
+Not included: cookies, logins and site data, and uBlock Origin's own filter settings (use the uBlock dashboard's *Back up to file* for those).
 
 ### 3.9 Extensions
 
@@ -314,7 +355,7 @@ Set a monthly reminder to run both scripts. If you host the project on GitHub, *
 - **Network:** no analytics or telemetry were added. Page loads go through the engine with strict tracking protection and in-app DoH. The only extra requests are the ones you trigger: extension downloads, long-press/⬇ downloads and VirusTotal scans (these use the system DNS, not the in-app DoH).
 - **Downloads:** file names are sanitized, links from other apps are opened only if they are `http(s)`, and every download is checked against its extension (see 3.8d).
 - **No bundled keys:** the app contains no API keys.
-- **Permissions:** the manifest declares Internet and network state, plus camera, microphone, audio settings and location. The last four are only used **after you tap Allow** on a website's request and then accept Android's own dialog; the app never asks for them by itself. Notifications are never allowed.
+- **Permissions:** the manifest declares Internet and network state, plus camera, microphone, audio settings and location. The last four are only used **after you tap Allow** on a website's request and then accept Android's own dialog; the app never asks for them by itself. Notifications are never allowed. **All files access** is requested only if you choose a custom download folder (see 3.8c); without it the app saves in Android's Downloads folder.
 - **Antivirus warnings:** a new APK signed by you and installed outside a store may be flagged as "unknown" (a common false positive). If your antivirus names a specific threat, check the exact alert text.
 - **Optional hardening:** setting `privacy.resistFingerprinting` in `about:config` increases protection but can break some sites.
 
@@ -331,6 +372,7 @@ Set a monthly reminder to run both scripts. If you host the project on GitHub, *
 | **VirusTotal says "invalid API key"** | Re-copy the key from your VirusTotal profile into **Menu > VirusTotal**. |
 | **VirusTotal limit reached** | The free API has per-minute and daily limits; try again later. |
 | **Cannot save a video** | It is probably a segmented or protected stream (see [3.8](#38-long-press-on-images-videos-audio-and-links)). |
+| **The folder cannot be chosen / says permission needed** | Choose **Menu > Folder > Choose folder**, tap **Open settings** and turn on **Allow access to manage all files** for Gabriel Browser, then go back. Without it, downloads go to Android's Downloads folder. |
 | **Update will not install over the old app** | It must be signed with the **same key** and have a **higher `versionCode`** (`app/build.gradle.kts`; the update scripts raise it for you). A lower or equal `versionCode` makes Android say the app is already up to date. |
 | **Camera, microphone or location does not work on a site** | Tap **Allow** on the panel, then accept Android's dialog. If you refused Android's dialog before, enable the permission in Android **Settings > Apps > Gabriel Browser > Permissions**. |
 | **A login or payment page says "Redirect blocked"** | The app blocks script redirects to another site that happen without a tap. Tap the sign-in button again, or try the site in **Desktop site** mode. Please report the site. |
