@@ -114,6 +114,9 @@ class MainActivity : Activity() {
         private const val REQ_FILE = 42
         private const val REQ_PERM = 44
         private const val REQ_RESTORE = 46
+        private const val KEY_RECOVER_LOG = "recover_log"
+        private const val STATE_TABS = "state_tabs"
+        private const val STATE_ACTIVE = "state_active"
         private const val KEY_ZOOM = "zoom"             // tamanho do texto em %
         private const val KEY_BAR_BOTTOM = "bar_bottom"  // barra de endereço em baixo
         private const val KEY_EXTS = "ext_urls"    // mapa id -> link .xpi das extensões do utilizador
@@ -151,6 +154,9 @@ class MainActivity : Activity() {
         var desktop = false
         var appNav = false
         var isPrivate = false
+        var pendingUrl: String? = null   // separador restaurado: carrega só quando for aberto
+        var discarded = false   // session closed on purpose to free memory; reloaded when opened again
+        var dead = false   // o processo de conteúdo morreu em segundo plano; recuperar ao voltar
         var readerPort: WebExtension.Port? = null
         var lastInsecure: String? = null
         val errorUris = HashSet<String>() // data: URIs das páginas de erro deste separador
@@ -235,7 +241,52 @@ class MainActivity : Activity() {
         if (Build.VERSION.SDK_INT >= 33) registerReceiver(dlReceiver, f, Context.RECEIVER_NOT_EXPORTED)
         else registerReceiver(dlReceiver, f)
 
-        appLoad(safeIntentUrl(intent) ?: homeUrl())
+        val intentUrl = safeIntentUrl(intent)
+        val restore = savedInstanceState?.getStringArrayList(STATE_TABS)
+            ?.filter { it.startsWith("https://") || it.startsWith("http://") }
+            ?.take(MAX_TABS).orEmpty()
+        if (intentUrl == null && restore.isNotEmpty()) {
+            // O Android terminou a app em segundo plano e recriou-a: volta aos separadores que tinhas.
+            restoreTabs(restore, savedInstanceState!!.getInt(STATE_ACTIVE, 0))
+        } else {
+            appLoad(intentUrl ?: homeUrl())
+        }
+    }
+
+    /** Guarda os endereços dos separadores normais (os privados nunca são guardados). */
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        try {
+            val normal = tabs.filter { !it.isPrivate }
+            val urls = ArrayList<String>()
+            var activeIdx = 0
+            normal.forEach { t ->
+                val u = t.pendingUrl ?: t.url
+                if (u != null && (u.startsWith("https://") || u.startsWith("http://")) && u.length < 4000) {
+                    if (t === active) activeIdx = urls.size
+                    urls.add(u)
+                }
+            }
+            if (urls.isNotEmpty()) {
+                outState.putStringArrayList(STATE_TABS, urls)
+                outState.putInt(STATE_ACTIVE, activeIdx)
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "guardar separadores: $e")
+        }
+    }
+
+    private fun restoreTabs(urls: List<String>, activeIdx: Int) {
+        val first = tabs[0]
+        first.url = urls[0]
+        first.pendingUrl = urls[0]
+        urls.drop(1).forEach { u ->
+            openNewTab(null, load = false, priv = false)
+            val t = tabs.last()
+            t.url = u
+            t.pendingUrl = u
+        }
+        tabs.getOrNull(activeIdx.coerceIn(0, tabs.size - 1))?.let { switchTo(it) }
     }
 
     // Só aceita http(s) vindo de outras apps (ignora javascript:, file:, about:, intent: …).
@@ -262,7 +313,7 @@ class MainActivity : Activity() {
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
         when {
-            fullscreen -> session.exitFullScreen()
+            fullscreen -> safeSession { it.exitFullScreen() }
             urlBar.hasFocus() -> {
                 urlBar.clearFocus()
                 geckoView.requestFocus()
@@ -572,12 +623,20 @@ class MainActivity : Activity() {
         } catch (e: Exception) {
             Log.w(TAG, "releaseSession: $e")
         }
-        geckoView.setSession(s)
+        try {
+            geckoView.setSession(s)
+        } catch (e: Exception) {
+            Log.w(TAG, "setSession falhou: $e")
+        }
     }
 
     private fun switchTo(tab: Tab) {
         if (::active.isInitialized && active !== tab) hideFindBar()
+        val previous = if (::active.isInitialized) active else null
         active = tab
+        if (previous != null && previous !== tab) {
+            try { if (sessionAlive(previous)) previous.session.setActive(false) } catch (e: Exception) { Log.w(TAG, "setActive(false): $e") }
+        }
         applyPrivateUi()
         attachToView(tab.session)
         refreshAddressBar()
@@ -589,6 +648,16 @@ class MainActivity : Activity() {
         updateTabCount()
         updateMediaButton()
         urlBar.clearFocus()
+        if (!sessionAlive(tab)) {
+            urlBar.post { recoverSession(tab) }
+        } else {
+            try { tab.session.setActive(true) } catch (e: Exception) { Log.w(TAG, "setActive(true): $e") }
+            tab.pendingUrl?.let { u ->
+                tab.pendingUrl = null
+                tab.appNav = true
+                safeSession(tab) { it.loadUri(u) }
+            }
+        }
     }
 
     private fun closeTab(tab: Tab) {
@@ -636,18 +705,80 @@ class MainActivity : Activity() {
         ).show()
     }
 
+    private var resumed = false
     private var lastRecover = 0L
     private var recoverCount = 0
+
+    /** Ignora avisos de sessões antigas; recupera já se a app está à vista, senão ao voltar. */
+    private fun onContentGone(sess: GeckoSession, tab: Tab, cause: String) {
+        runOnUiThread {
+            if (sess !== tab.session || !tabs.contains(tab)) return@runOnUiThread
+            noteRecover(cause, tab)
+            if (resumed && tab === active) recoverSession(tab) else tab.dead = true
+        }
+    }
+
+    /** Keeps the last few recovery events (time, cause, host) so About can show why pages failed. */
+    private fun noteRecover(cause: String, tab: Tab) {
+        try {
+            val line = java.text.SimpleDateFormat("dd/MM HH:mm", java.util.Locale.getDefault()).format(java.util.Date()) +
+                " " + cause + " " + (hostOf(tab.url) ?: "")
+            val old = prefs().getString(KEY_RECOVER_LOG, "").orEmpty().lines().filter { it.isNotBlank() }
+            prefs().edit().putString(KEY_RECOVER_LOG, (old + line.trim()).takeLast(6).joinToString("\n")).apply()
+        } catch (e: Exception) {
+            Log.w(TAG, "noteRecover: $e")
+        }
+    }
+
+    /** Frees memory: closes the engine session of a background tab; it reloads its page when opened again. */
+    private fun discardTab(tab: Tab) {
+        if (tab === active || tab.isPrivate || !sessionAlive(tab)) return
+        val u = tab.url ?: return
+        if (!(u.startsWith("https://") || u.startsWith("http://"))) return
+        tab.pendingUrl = u
+        tab.discarded = true
+        try { tab.session.close() } catch (e: Exception) { Log.w(TAG, "discard close: $e") }
+    }
+
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        // Visible and critically low, or in the background and the system really needs memory.
+        val low = (level >= android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL &&
+            level < android.content.ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN) ||
+            level >= android.content.ComponentCallbacks2.TRIM_MEMORY_MODERATE
+        if (low) tabs.toList().forEach { discardTab(it) }
+    }
+
+    private fun sessionAlive(tab: Tab): Boolean =
+        try { !tab.dead && tab.session.isOpen } catch (e: Exception) { false }
+
+    /** Executa uma ação sobre a sessão; se a sessão morreu (em vez de fechar a app), recupera-a. */
+    private fun safeSession(tab: Tab = active, block: (GeckoSession) -> Unit) {
+        try {
+            if (!sessionAlive(tab)) throw IllegalStateException("sessão inativa")
+            block(tab.session)
+        } catch (e: Exception) {
+            Log.w(TAG, "invalid session, recovering: $e")
+            noteRecover("session:" + e.javaClass.simpleName, tab)
+            recoverSession(tab)
+        }
+    }
 
     private fun recoverSession(tab: Tab) {
         runOnUiThread {
             if (!tabs.contains(tab)) return@runOnUiThread
             // Evita ciclos: depois de 3 falhas seguidas num minuto, abre uma página em branco.
-            val now = SystemClock.elapsedRealtime()
-            if (now - lastRecover > 60_000) recoverCount = 0
-            lastRecover = now
-            recoverCount++
-            val url = if (recoverCount > 3) "about:blank" else (tab.url ?: homeUrl())
+            val quiet = tab.discarded
+            tab.discarded = false
+            if (!quiet) {
+                val now = SystemClock.elapsedRealtime()
+                if (now - lastRecover > 60_000) recoverCount = 0
+                lastRecover = now
+                recoverCount++
+            }
+            tab.dead = false
+            val url = if (recoverCount > 3) "about:blank" else (tab.pendingUrl ?: tab.url ?: homeUrl())
+            tab.pendingUrl = null
             if (recoverCount > 3) toast("A página continua a falhar")
             try {
                 tab.session.close()
@@ -662,7 +793,7 @@ class MainActivity : Activity() {
             if (tab === active) attachToView(s)
             tab.appNav = true
             s.loadUri(url)
-            toast("Página recuperada após falha")
+            if (!quiet) toast("Página recuperada após falha")
         }
     }
 
@@ -679,7 +810,7 @@ class MainActivity : Activity() {
 
     private fun appLoad(uri: String) {
         appNav = true
-        session.loadUri(uri)
+        safeSession { it.loadUri(uri) }
     }
 
     // Aviso de ligação não segura (http://), uma vez por endereço, com proposta de análise no VirusTotal.
@@ -781,17 +912,17 @@ class MainActivity : Activity() {
 
     private fun appBack() {
         appNav = true
-        session.goBack()
+        safeSession { it.goBack() }
     }
 
     private fun appForward() {
         appNav = true
-        session.goForward()
+        safeSession { it.goForward() }
     }
 
     private fun appReload() {
         appNav = true
-        session.reload()
+        safeSession { it.reload() }
     }
 
     // ---------------------------------------------------------------- delegates
@@ -929,7 +1060,10 @@ class MainActivity : Activity() {
                     setLoadingUi(false)
                     progress.visibility = View.INVISIBLE
                 }
-                if (success) recordHistory(tab.url, tab.title, tab.isPrivate)
+                if (success) {
+                    recoverCount = 0
+                    recordHistory(tab.url, tab.title, tab.isPrivate)
+                }
             }
         }
 
@@ -969,11 +1103,12 @@ class MainActivity : Activity() {
             }
 
             override fun onCrash(sess: GeckoSession) {
-                recoverSession(tab)
+                onContentGone(sess, tab, "crash")
             }
 
             override fun onKill(sess: GeckoSession) {
-                recoverSession(tab)
+                // O Android mata processos em segundo plano para libertar memória.
+                onContentGone(sess, tab, "kill")
             }
         }
 
@@ -1779,8 +1914,27 @@ class MainActivity : Activity() {
             .show()
     }
 
+    override fun onPause() {
+        resumed = false
+        super.onPause()
+    }
+
     override fun onResume() {
         super.onResume()
+        resumed = true
+        // Voltámos de segundo plano: se o conteúdo morreu ou a sessão fechou, recupera em vez de mostrar branco.
+        if (::active.isInitialized) {
+            if (!sessionAlive(active)) {
+                recoverSession(active)
+            } else {
+                try {
+                    if (geckoView.session !== active.session) attachToView(active.session)
+                } catch (e: Exception) {
+                    Log.w(TAG, "re-anexar sessão: $e")
+                    recoverSession(active)
+                }
+            }
+        }
         if (pickAfterPermission) {
             pickAfterPermission = false
             if (hasAllFiles()) {
@@ -1922,7 +2076,7 @@ class MainActivity : Activity() {
         btnBack.setOnClickListener { if (canGoBack) appBack() }
         btnForward.setOnClickListener { if (canGoForward) appForward() }
         btnHome.setOnClickListener { appLoad(homeUrl()) }
-        btnReload.setOnClickListener { if (loading) session.stop() else appReload() }
+        btnReload.setOnClickListener { if (loading) safeSession { it.stop() } else appReload() }
         btnMenu.setOnClickListener { showMenu() }
         mediaBtn.setOnClickListener { showMedia() }
         btnTabs.setOnClickListener { showTabs() }
@@ -3007,6 +3161,31 @@ class MainActivity : Activity() {
         }
     }
 
+    /** Porque é que a app foi fechada da última vez (Android 11+), para diagnosticar reinícios. */
+    private fun lastExitInfo(engine: Boolean = false): String? {
+        if (Build.VERSION.SDK_INT < 30) return null
+        return try {
+            val am = getSystemService(ACTIVITY_SERVICE) as android.app.ActivityManager
+            val r = am.getHistoricalProcessExitReasons(packageName, 0, 10)
+                .firstOrNull { (it.processName == packageName) != engine } ?: return null
+            val why = when (r.reason) {
+                android.app.ApplicationExitInfo.REASON_LOW_MEMORY -> "pouca memória"
+                android.app.ApplicationExitInfo.REASON_CRASH -> "falha da app"
+                android.app.ApplicationExitInfo.REASON_CRASH_NATIVE -> "falha nativa"
+                android.app.ApplicationExitInfo.REASON_ANR -> "app bloqueada (ANR)"
+                android.app.ApplicationExitInfo.REASON_USER_REQUESTED -> "fechada pelo utilizador"
+                android.app.ApplicationExitInfo.REASON_SIGNALED -> "terminada pelo sistema"
+                android.app.ApplicationExitInfo.REASON_EXCESSIVE_RESOURCE_USAGE -> "uso excessivo de recursos"
+                android.app.ApplicationExitInfo.REASON_EXIT_SELF -> "saiu sozinha"
+                else -> "outro motivo"
+            }
+            val date = java.text.SimpleDateFormat("dd/MM HH:mm", java.util.Locale.getDefault()).format(java.util.Date(r.timestamp))
+            I18n.tr(why) + " · " + date
+        } catch (e: Exception) {
+            null
+        }
+    }
+
     private fun showAbout() {
         val version = try {
             packageManager.getPackageInfo(packageName, 0).versionName
@@ -3023,6 +3202,12 @@ class MainActivity : Activity() {
             .info("🛡", "Proteção estrita", "Rastreio e só HTTPS")
             .info("🚫", "uBlock Origin", ublockVersion().let { v -> if (v.isEmpty()) "Embutido" else "Embutido · v$v" })
             .info("↩", "Pop-ups e redirecionamentos", "Bloqueados")
+            .also { sh ->
+                lastExitInfo()?.let { sh.info("🩺", "Último fecho da app", it) }
+                lastExitInfo(engine = true)?.let { sh.info("⚙", "Último fecho do motor", it) }
+                val log = prefs().getString(KEY_RECOVER_LOG, "").orEmpty().trim()
+                if (log.isNotEmpty()) sh.info("⚠", "Falhas recentes", log)
+            }
             .card("🦠", "VirusTotal", "Análise automática de sites suspeitos", onClick = { showVirusTotalSettings() })
             .note("Mantém o motor atualizado: a segurança depende disso.")
             .actions(Triple("Fechar", BtnStyle.PRIMARY) {})

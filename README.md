@@ -112,7 +112,8 @@ If a GeckoView method fails to compile, the API names change between versions: c
 - Up to 12 tabs can be open. Each tab keeps its own page, tracker counter and loading state.
 - A link that opens a "new window" after you tap it opens in a new tab. Pop-ups that appear without a tap are blocked.
 - **Private** mode works per tab: **Menu > Private** opens a new private tab (or a new normal tab when you are in a private one) and **keeps your other tabs open**. Private tabs are marked with 🕶 in the tab list.
-- Tabs are not restored when the app is closed.
+- Tabs are not restored when you close the app yourself. But if **Android ends the app in the background** (low memory) and you come back to it, your normal tabs and the one you were on are reopened (only the active tab loads at first; the others load when you open them). Private tabs are never restored.
+- **Menu > About** shows why the app was last closed (low memory, crash, closed by the user…), which helps to find out why it restarted.
 
 ### 3.2 The menu
 
@@ -365,6 +366,7 @@ Set a monthly reminder to run both scripts. If you host the project on GitHub, *
 
 | Problem | What to try |
 |---|---|
+| **"Page recovered after a failure" appears** | The browser engine was stopped (usually low memory) or crashed, and the app reloaded the page. Background tabs are now released when the system is short of memory and reload when you open them. **Menu > About** lists the most recent failures and why the app and the engine were last closed; send me those lines if it keeps happening. |
 | **uBlock Origin shows "not loaded"** | Run `./scripts/update-ublock.sh` and rebuild; check `app/src/main/assets/ublock/`. |
 | **A site will not open** | HTTPS-only mode blocks plain `http://`. Choose to continue on the warning page if you trust the site. Also try **Desktop site**. |
 | **A page or site breaks** | A strict setting may be the cause: try the site in a normal session, disable an extension, or clear data for that site. |

@@ -31,8 +31,8 @@ android {
         applicationId = "pt.gabriel.browser"
         minSdk = 29
         targetSdk = 35
-        versionCode = 2026111372
-        versionName = "1.0-gv160"
+        versionCode = 2026111402
+        versionName = "1.0-gv161"
 
         // Só arm64 (quase todos os telemóveis recentes): reduz muito o tamanho do APK.
         // Se o teu aparelho for de 32 bits, acrescenta "armeabi-v7a".
